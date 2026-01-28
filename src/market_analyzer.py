@@ -70,10 +70,17 @@ class MarketOverview:
     limit_down_count: int = 0           # 跌停家数
     total_amount: float = 0.0           # 两市成交额（亿元）
     north_flow: float = 0.0             # 北向资金净流入（亿元）
-    
+
     # 板块涨幅榜
     top_sectors: List[Dict] = field(default_factory=list)     # 涨幅前5板块
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
+
+    # ========== 牛市逃顶指标 ==========
+    margin_balance: float = 0.0         # 两市融资余额（亿元）
+    total_market_cap: float = 0.0       # 两市总市值（亿元）
+    margin_ratio: float = 0.0           # 融资余额/总市值比值（%）
+    is_bull_top_warning: bool = False   # 是否触发逃顶警告（比值 > 3.5%）
+    margin_data_date: str = ""          # 融资数据日期
 
 
 class MarketAnalyzer:
@@ -113,25 +120,28 @@ class MarketAnalyzer:
     def get_market_overview(self) -> MarketOverview:
         """
         获取市场概览数据
-        
+
         Returns:
             MarketOverview: 市场概览数据对象
         """
         today = datetime.now().strftime('%Y-%m-%d')
         overview = MarketOverview(date=today)
-        
+
         # 1. 获取主要指数行情
         overview.indices = self._get_main_indices()
-        
+
         # 2. 获取涨跌统计
         self._get_market_statistics(overview)
-        
+
         # 3. 获取板块涨跌榜
         self._get_sector_rankings(overview)
-        
+
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
-        
+
+        # 5. 获取牛市逃顶指标
+        self._get_bull_market_indicator(overview)
+
         return overview
 
     def _call_akshare_with_retry(self, fn, name: str, attempts: int = 2):
@@ -343,7 +353,216 @@ class MarketAnalyzer:
                 
     #     except Exception as e:
     #         logger.warning(f"[大盘] 获取北向资金失败: {e}")
-    
+
+    def _get_bull_market_indicator(self, overview: MarketOverview):
+        """
+        获取牛市逃顶指标
+
+        计算公式：融资余额 / 两市总市值
+        警告阈值：> 3.5%
+
+        数据来源：
+        - 融资余额：ak.stock_margin_account_info() 获取两融账户信息
+        - 总市值：ak.stock_sse_summary() + ak.stock_szse_summary()
+        """
+        try:
+            logger.info("[大盘] 获取牛市逃顶指标...")
+
+            # 1. 获取融资余额（两市合计）
+            margin_balance = self._get_margin_balance()
+
+            # 2. 获取两市总市值
+            total_market_cap = self._get_total_market_cap()
+
+            if margin_balance > 0 and total_market_cap > 0:
+                # 计算融资余额占总市值比例
+                margin_ratio = (margin_balance / total_market_cap) * 100
+                overview.margin_balance = margin_balance
+                overview.total_market_cap = total_market_cap
+                overview.margin_ratio = round(margin_ratio, 2)
+                overview.is_bull_top_warning = margin_ratio > 3.5
+
+                warning_text = "⚠️ 触发逃顶警告!" if overview.is_bull_top_warning else "正常"
+                logger.info(f"[大盘] 逃顶指标: 融资余额={margin_balance:.0f}亿, "
+                          f"总市值={total_market_cap:.0f}亿, "
+                          f"比值={margin_ratio:.2f}% {warning_text}")
+            else:
+                logger.warning(f"[大盘] 逃顶指标数据不完整: 融资余额={margin_balance}, 总市值={total_market_cap}")
+
+        except Exception as e:
+            logger.error(f"[大盘] 获取逃顶指标失败: {e}")
+
+    def _get_margin_balance(self) -> float:
+        """
+        获取两市融资余额（亿元）
+
+        数据来源：ak.stock_margin_account_info()
+        返回最新一天的融资余额数据
+        """
+        try:
+            # 获取两融账户信息
+            df = self._call_akshare_with_retry(ak.stock_margin_account_info, "融资融券账户信息", attempts=2)
+
+            if df is not None and not df.empty:
+                # 按日期排序，取最新一条
+                if '日期' in df.columns:
+                    df['日期'] = pd.to_datetime(df['日期'])
+                    df = df.sort_values('日期', ascending=False)
+
+                latest = df.iloc[0]
+
+                # 融资余额字段（单位：亿元）
+                if '融资余额' in df.columns:
+                    margin_balance = float(latest['融资余额'])
+                    logger.debug(f"[大盘] 融资余额: {margin_balance:.2f}亿 (日期: {latest.get('日期', 'N/A')})")
+                    return margin_balance
+
+            return 0.0
+
+        except Exception as e:
+            logger.warning(f"[大盘] 获取融资余额失败: {e}")
+            return 0.0
+
+    def _get_total_market_cap(self) -> float:
+        """
+        获取两市总市值（亿元）
+
+        计算方式：上交所总市值 + 深交所总市值
+        数据来源：
+        - 上交所：ak.stock_sse_summary()
+        - 深交所：ak.stock_szse_summary()
+        """
+        total_cap = 0.0
+
+        try:
+            # 1. 获取上交所总市值
+            sse_cap = self._get_sse_market_cap()
+            total_cap += sse_cap
+
+            # 2. 获取深交所总市值
+            szse_cap = self._get_szse_market_cap()
+            total_cap += szse_cap
+
+            logger.debug(f"[大盘] 两市总市值: 上交所={sse_cap:.0f}亿 + 深交所={szse_cap:.0f}亿 = {total_cap:.0f}亿")
+
+        except Exception as e:
+            logger.warning(f"[大盘] 获取总市值失败: {e}")
+
+        return total_cap
+
+    def _get_sse_market_cap(self) -> float:
+        """获取上交所总市值（亿元）"""
+        try:
+            df = self._call_akshare_with_retry(ak.stock_sse_summary, "上交所市值统计", attempts=2)
+
+            if df is not None and not df.empty:
+                # 查找总市值行
+                cap_row = df[df['项目'] == '总市值']
+                if not cap_row.empty:
+                    # 单位：亿元
+                    cap = float(cap_row.iloc[0].get('股票', 0) or 0)
+                    return cap
+
+                # 备选：尝试其他列名
+                for col in df.columns:
+                    if '市值' in str(col) or 'market' in str(col).lower():
+                        return float(df[col].sum()) if df[col].dtype in ['float64', 'int64'] else 0.0
+
+            return 0.0
+
+        except Exception as e:
+            logger.debug(f"[大盘] 获取上交所市值失败: {e}")
+            return 0.0
+
+    def _get_szse_market_cap(self) -> float:
+        """获取深交所总市值（亿元）"""
+        try:
+            import requests
+            import json
+            from datetime import timedelta
+            today = datetime.now()
+            date_str = today.strftime('%Y-%m-%d')
+
+            try:
+                # 直接调用深交所API
+                url = f"https://www.szse.cn/api/report/ShowReport/data"
+                params = {
+                    "SHOWTYPE": "json",
+                    # 页面属性是1803_after不知道是啥含义，返回的字段就又不一样了
+                    "CATALOGID": "1803_sczm",
+                    "TABKEY": "tab1",
+                    "txtQueryDate": date_str,
+                    "random": str(time.time())
+                }
+                logger.info("那不成调2次？")
+
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://www.szse.cn/market/stock/summary/index.html",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+                }
+
+                response = requests.get(url, params=params, headers=headers, timeout=10)
+                response.raise_for_status()
+
+                data = response.json()
+                
+                # 解析响应数据
+                if isinstance(data, list) and len(data) > 0:
+                    table_data = data[0].get('data', [])
+                    # logger.info("调接口拿到的值,",table_data)
+                    for row in table_data:
+                        # 尝试不同的字段名
+                        if row.get('lbmc') == '股票' or row.get('zqlb') == '股票' or row.get('证券类别') == '股票':
+                            # 尝试不同的总市值字段名
+                            cap_str = row.get('sjzz', '') or row.get('zsz', '') or row.get('总市值', '')
+                            if cap_str:
+                                # 移除逗号和单位，转换为浮点数
+                                cap_str = cap_str.replace(',', '').replace('亿元', '')
+                                try:
+                                    cap = float(cap_str)
+                                    logger.info(f"[大盘] 深交所股票总市值: {cap:.2f}亿 (日期: {date_str})")
+                                    return cap
+                                except ValueError:
+                                    logger.info(f"[大盘] 总市值转换失败: {cap_str}")
+
+            except Exception as e:
+                logger.debug(f"[大盘] 深交所API调用失败 (日期: {date_str}): {e}")
+
+            # 直接API调用失败，使用akshare作为兜底方案
+            # logger.info("[大盘] 直接API调用失败，使用akshare作为兜底方案")
+            # from datetime import timedelta
+            # today = datetime.now()
+
+            # # 尝试最近5个交易日
+            # for i in range(1):
+            #     check_date = today - timedelta(days=i)
+            #     date_str = check_date.strftime('%Y%m%d')
+
+            #     try:
+            #         df = ak.stock_szse_summary(date=date_str)
+
+            #         if df is not None and not df.empty:
+            #             # 查找股票总市值行
+            #             cap_row = df[df['证券类别'] == '股票']
+            #             if not cap_row.empty:
+            #                 cap = float(cap_row.iloc[0].get('总市值', 0) or 0)
+            #                 # 单位转换：元 -> 亿元
+            #                 if cap > 1e12:  # 如果数值很大，说明单位是元
+            #                     cap = cap / 1e8
+            #                 logger.debug(f"[大盘] akshare获取深交所股票总市值: {cap:.2f}亿 (日期: {date_str})")
+            #                 return cap
+            #     except Exception as e:
+            #         logger.debug(f"[大盘] akshare调用失败 (日期: {date_str}): {e}")
+            #         continue
+
+            return 0.0
+
+        except Exception as e:
+            logger.debug(f"[大盘] 获取深交所市值失败: {e}")
+            return 0.0
+
     def search_market_news(self) -> List[Dict]:
         """
         搜索市场新闻
@@ -436,7 +655,18 @@ class MarketAnalyzer:
         except Exception as e:
             logger.error(f"[大盘] 大模型生成复盘报告失败: {e}")
             return self._generate_template_review(overview, news)
-    
+
+    def _format_margin_data_for_prompt(self, overview: MarketOverview) -> str:
+        """格式化逃顶指标数据用于 AI prompt"""
+        if overview.margin_ratio <= 0:
+            return "暂无数据"
+
+        warning_text = "【警告】触发逃顶信号！" if overview.is_bull_top_warning else ""
+        return f"""- 两市融资余额: {overview.margin_balance:.0f}亿
+                - 两市总市值: {overview.total_market_cap:.0f}亿
+                - 融资/市值比: {overview.margin_ratio:.2f}% (阈值: 3.5%)
+                {warning_text}"""
+
     def _build_review_prompt(self, overview: MarketOverview, news: List) -> str:
         """构建复盘报告 Prompt"""
         # 指数行情信息（简洁格式，不用emoji）
@@ -444,11 +674,11 @@ class MarketAnalyzer:
         for idx in overview.indices:
             direction = "↑" if idx.change_pct > 0 else "↓" if idx.change_pct < 0 else "-"
             indices_text += f"- {idx.name}: {idx.current:.2f} ({direction}{abs(idx.change_pct):.2f}%)\n"
-        
+
         # 板块信息
         top_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.top_sectors[:3]])
         bottom_sectors_text = ", ".join([f"{s['name']}({s['change_pct']:+.2f}%)" for s in overview.bottom_sectors[:3]])
-        
+
         # 新闻信息 - 支持 SearchResult 对象或字典
         news_text = ""
         for i, n in enumerate(news[:6], 1):
@@ -485,6 +715,9 @@ class MarketAnalyzer:
 - 两市成交额: {overview.total_amount:.0f} 亿元
 - 北向资金: {overview.north_flow:+.2f} 亿元
 
+## 牛市逃顶指标
+{self._format_margin_data_for_prompt(overview)}
+
 ## 板块表现
 领涨: {top_sectors_text if top_sectors_text else "暂无数据"}
 领跌: {bottom_sectors_text if bottom_sectors_text else "暂无数据"}
@@ -509,21 +742,62 @@ class MarketAnalyzer:
 ### 三、资金动向
 （解读成交额和北向资金流向的含义）
 
-### 四、热点解读
+### 四、逃顶指标分析
+（分析融资余额/总市值比值，判断市场是否过热，是否触发逃顶警告）
+
+### 五、热点解读
 （分析领涨领跌板块背后的逻辑和驱动因素）
 
-### 五、后市展望
+### 六、后市展望
 （结合当前走势和新闻，给出明日市场预判）
 
-### 六、风险提示
-（需要关注的风险点）
+### 七、风险提示
+（需要关注的风险点，特别是如果逃顶指标异常需要重点提示）
 
 ---
 
 请直接输出复盘报告内容，不要输出其他说明文字。
 """
         return prompt
-    
+
+    def _format_bull_top_indicator(self, overview: MarketOverview) -> str:
+        """
+        格式化牛市逃顶指标展示
+
+        Args:
+            overview: 市场概览数据
+
+        Returns:
+            格式化后的逃顶指标文本
+        """
+        if overview.margin_ratio <= 0:
+            return "暂无数据（融资余额或总市值数据获取失败）"
+
+        # 状态判断
+        if overview.is_bull_top_warning:
+            status = "🔴 **警告：触发逃顶信号！**"
+            tip = "融资余额占比超过 3.5%，市场过热，建议谨慎操作"
+        elif overview.margin_ratio > 3.0:
+            status = "🟡 **关注：接近警戒线**"
+            tip = "融资余额占比接近 3.5%，市场情绪偏热"
+        elif overview.margin_ratio > 2.5:
+            status = "🟢 **正常：市场情绪适中**"
+            tip = "融资余额占比处于合理区间"
+        else:
+            status = "🟢 **安全：市场情绪偏冷**"
+            tip = "融资余额占比较低，市场相对安全"
+
+        return f"""| 指标 | 数值 |
+|------|------|
+| 两市融资余额 | {overview.margin_balance:.0f}亿 |
+| 两市总市值 | {overview.total_market_cap:.0f}亿 |
+| 融资/市值比 | **{overview.margin_ratio:.2f}%** |
+| 逃顶阈值 | 3.5% |
+
+{status}
+
+> 💡 {tip}"""
+
     def _generate_template_review(self, overview: MarketOverview, news: List) -> str:
         """使用模板生成复盘报告（无大模型时的备选方案）"""
         
@@ -569,11 +843,14 @@ class MarketAnalyzer:
 | 两市成交额 | {overview.total_amount:.0f}亿 |
 | 北向资金 | {overview.north_flow:+.2f}亿 |
 
-### 四、板块表现
+### 四、牛市逃顶指标
+{self._format_bull_top_indicator(overview)}
+
+### 五、板块表现
 - **领涨**: {top_text}
 - **领跌**: {bottom_text}
 
-### 五、风险提示
+### 六、风险提示
 市场有风险，投资需谨慎。以上数据仅供参考，不构成投资建议。
 
 ---

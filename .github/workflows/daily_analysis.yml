@@ -195,7 +195,7 @@ jobs:
           git config --global user.email "805595996@qq.com"
           
           # 检查是否有更改
-          git add reports/ logs/
+          git add -f reports/
           
           # 只有当有更改时才提交
           if git status --porcelain | grep -q .; then
