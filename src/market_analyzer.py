@@ -443,7 +443,7 @@ class MarketAnalyzer:
             szse_cap = self._get_szse_market_cap()
             total_cap += szse_cap
 
-            logger.debug(f"[大盘] 两市总市值: 上交所={sse_cap:.0f}亿 + 深交所={szse_cap:.0f}亿 = {total_cap:.0f}亿")
+            logger.info(f"[大盘] 两市总市值: 上交所={sse_cap:.0f}亿 + 深交所={szse_cap:.0f}亿 = {total_cap:.0f}亿")
 
         except Exception as e:
             logger.warning(f"[大盘] 获取总市值失败: {e}")
@@ -461,12 +461,15 @@ class MarketAnalyzer:
                 if not cap_row.empty:
                     # 单位：亿元
                     cap = float(cap_row.iloc[0].get('股票', 0) or 0)
+                    logger.debug(f"[大盘] 上交所股票总市值: {cap:.2f}亿 ")
                     return cap
 
                 # 备选：尝试其他列名
                 for col in df.columns:
                     if '市值' in str(col) or 'market' in str(col).lower():
-                        return float(df[col].sum()) if df[col].dtype in ['float64', 'int64'] else 0.0
+                        cap = float(df[col].sum()) if df[col].dtype in ['float64', 'int64'] else 0.0
+                        logger.debug(f"[大盘] 上交所股票总市值: {cap:.2f}亿 ")
+                        return cap
 
             return 0.0
 
@@ -483,52 +486,48 @@ class MarketAnalyzer:
             today = datetime.now()
             date_str = today.strftime('%Y-%m-%d')
 
-            try:
-                # 直接调用深交所API
-                url = f"https://www.szse.cn/api/report/ShowReport/data"
-                params = {
-                    "SHOWTYPE": "json",
-                    # 页面属性是1803_after不知道是啥含义，返回的字段就又不一样了
-                    "CATALOGID": "1803_sczm",
-                    "TABKEY": "tab1",
-                    "txtQueryDate": date_str,
-                    "random": str(time.time())
-                }
-                logger.info("那不成调2次？")
+            # 直接调用深交所API
+            url = f"https://www.szse.cn/api/report/ShowReport/data"
+            params = {
+                "SHOWTYPE": "json",
+                # 页面属性是1803_after不知道是啥含义，返回的字段就又不一样了
+                "CATALOGID": "1803_sczm",
+                "TABKEY": "tab1",
+                "txtQueryDate": date_str,
+                "random": str(time.time())
+            }
 
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": "https://www.szse.cn/market/stock/summary/index.html",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-                }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://www.szse.cn/market/stock/summary/index.html",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
+            }
 
-                response = requests.get(url, params=params, headers=headers, timeout=10)
-                response.raise_for_status()
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response.raise_for_status()
 
-                data = response.json()
-                
-                # 解析响应数据
-                if isinstance(data, list) and len(data) > 0:
-                    table_data = data[0].get('data', [])
-                    # logger.info("调接口拿到的值,",table_data)
-                    for row in table_data:
-                        # 尝试不同的字段名
-                        if row.get('lbmc') == '股票' or row.get('zqlb') == '股票' or row.get('证券类别') == '股票':
-                            # 尝试不同的总市值字段名
-                            cap_str = row.get('sjzz', '') or row.get('zsz', '') or row.get('总市值', '')
-                            if cap_str:
-                                # 移除逗号和单位，转换为浮点数
-                                cap_str = cap_str.replace(',', '').replace('亿元', '')
-                                try:
-                                    cap = float(cap_str)
-                                    logger.info(f"[大盘] 深交所股票总市值: {cap:.2f}亿 (日期: {date_str})")
-                                    return cap
-                                except ValueError:
-                                    logger.info(f"[大盘] 总市值转换失败: {cap_str}")
+            data = response.json()
+            
+            # 解析响应数据
+            if isinstance(data, list) and len(data) > 0:
+                table_data = data[0].get('data', [])
+                # logger.info("调接口拿到的值,",table_data)
+                for row in table_data:
+                    # 尝试不同的字段名
+                    if row.get('lbmc') == '股票' or row.get('zqlb') == '股票' or row.get('证券类别') == '股票':
+                        # 尝试不同的总市值字段名
+                        cap_str = row.get('sjzz', '') or row.get('zsz', '') or row.get('总市值', '')
+                        if cap_str:
+                            # 移除逗号和单位，转换为浮点数
+                            cap_str = cap_str.replace(',', '').replace('亿元', '')
+                            try:
+                                cap = float(cap_str)
+                                logger.debug(f"[大盘] 深交所股票总市值: {cap:.2f}亿 (日期: {date_str})")
+                                return cap
+                            except ValueError:
+                                logger.debug(f"[大盘] 总市值转换失败: {cap_str}")
 
-            except Exception as e:
-                logger.debug(f"[大盘] 深交所API调用失败 (日期: {date_str}): {e}")
 
             # 直接API调用失败，使用akshare作为兜底方案
             # logger.info("[大盘] 直接API调用失败，使用akshare作为兜底方案")
