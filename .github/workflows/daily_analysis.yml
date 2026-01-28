@@ -195,7 +195,7 @@ jobs:
           git config --global user.email "805595996@qq.com"
           
           # 检查是否有更改
-          git add -f reports/
+          git add -f src/reports/
           
           # 只有当有更改时才提交
           if git status --porcelain | grep -q .; then
@@ -214,9 +214,9 @@ jobs:
           echo "=========================================="
           echo "📊 分析完成"
           echo "=========================================="
-          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+          if [ -d "src/reports" ] && [ "$(ls -A src/reports 2>/dev/null)" ]; then
             echo "生成的报告:"
-            ls -la reports/
+            ls -la src/reports/
           else
             echo "⚠️ 未生成报告文件"
           fi
