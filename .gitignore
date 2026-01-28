@@ -67,3 +67,5 @@ local/
 run.sh
 
 verify_*.py
+
+.history

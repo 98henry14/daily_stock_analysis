@@ -187,6 +187,25 @@ jobs:
             reports/
             logs/
           retention-days: 30
+      - name: 提交分析报告到仓库
+        if: always()
+        run: |
+          # 配置 git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "805595996@qq.com"
+          
+          # 检查是否有更改
+          git add reports/ logs/
+          
+          # 只有当有更改时才提交
+          if git status --porcelain | grep -q .; then
+            git commit -m "自动提交分析报告 $(date +'%Y-%m-%d')"
+            git push origin HEAD:main
+          else
+            echo "没有文件需要提交"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: 显示运行结果
         if: always()
