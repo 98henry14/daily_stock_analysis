@@ -29,8 +29,20 @@ from src.config import get_config
 logger = logging.getLogger(__name__)
 
 
-# 股票名称映射（常见股票）
-STOCK_NAME_MAP = {
+import os
+
+# 加载股票名称映射
+def load_stock_name_map():
+    json_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "stock_name_map_.json"
+    )
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"加载股票名称映射失败：{e}")
+        return {
     # === A股 ===
     '600519': '贵州茅台',
     '000001': '平安银行',
@@ -85,6 +97,10 @@ STOCK_NAME_MAP = {
     '00941': '中国移动',
     '00883': '中国海洋石油',
 }
+
+
+# 股票名称映射（常见股票）
+STOCK_NAME_MAP = load_stock_name_map()
 
 
 def get_stock_name_multi_source(
